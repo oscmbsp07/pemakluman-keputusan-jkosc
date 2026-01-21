@@ -1,336 +1,392 @@
 import re
-import io
 import zipfile
+from io import BytesIO
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import streamlit as st
 from docx import Document
-from docx.text.paragraph import Paragraph
 
 
 # =========================
-# UI CONFIG
+# Config
 # =========================
-st.set_page_config(page_title="Pemakluman Keputusan JKOSC", layout="wide")
-st.title("Pemakluman Keputusan JKOSC")
-st.caption("Upload Agenda (Word) → sistem extract KM & Bangunan → generate dokumen (Word) ikut template → download ZIP.")
+TEMPLATE_PATH = "templates/template dokumen panggilan.docx"
 
-
-# =========================
-# HELPERS
-# =========================
-MONTH_MAP = {
-    "JANUARI": "Januari",
-    "FEBRUARI": "Februari",
-    "MAC": "Mac",
-    "APRIL": "April",
-    "MEI": "Mei",
-    "JUN": "Jun",
-    "JULAI": "Julai",
-    "OGOS": "Ogos",
-    "SEPTEMBER": "September",
-    "OKTOBER": "Oktober",
-    "NOVEMBER": "November",
-    "DISEMBER": "Disember",
+MONTHS_MS = {
+    "januari": 1,
+    "februari": 2,
+    "mac": 3,
+    "april": 4,
+    "mei": 5,
+    "jun": 6,
+    "julai": 7,
+    "ogos": 8,
+    "september": 9,
+    "oktober": 10,
+    "november": 11,
+    "disember": 12,
 }
+MONTHS_MS_INV = {v: k.capitalize() for k, v in MONTHS_MS.items()}
 
-def normalize_spaces(s: str) -> str:
-    s = s.replace("\u00a0", " ")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s.strip()
-
-def format_tarikh_malay(raw: str) -> str:
-    raw = normalize_spaces(raw).upper()
-    m = re.search(r"(\d{1,2})\s+([A-Z]+)\s+(\d{4})", raw)
-    if not m:
-        return raw.title()
-    day = int(m.group(1))
-    mon = m.group(2)
-    year = m.group(3)
-    mon2 = MONTH_MAP.get(mon, mon.title())
-    return f"{day} {mon2} {year}"
-
-def extract_bil_year(text: str) -> Optional[Tuple[int, int]]:
-    t = text.upper()
-    m = re.search(r"\bBIL\.?\s*0*(\d{1,2})\s*/\s*(\d{4})\b", t)
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2))
-
-def extract_tarikh_mesyuarat(lines: List[str]) -> Optional[str]:
-    for ln in lines:
-        u = ln.upper()
-        if "TARIKH" in u:
-            m = re.search(r"TARIKH\s*[:\-]\s*(\d{1,2}\s+[A-Z]+\s+\d{4})", u)
-            if m:
-                return format_tarikh_malay(m.group(1))
-    for ln in lines[:80]:
-        u = ln.upper()
-        m = re.search(r"\b(\d{1,2}\s+[A-Z]+\s+\d{4})\b", u)
-        if m:
-            return format_tarikh_malay(m.group(1))
-    return None
+DAYS_MS = ["Isnin", "Selasa", "Rabu", "Khamis", "Jumaat", "Sabtu", "Ahad"]
 
 
 # =========================
-# PARSE AGENDA (KM & BANGUNAN)
+# Data model
 # =========================
 @dataclass
-class CaseItem:
-    case_no: str
-    kertas_bil: str
-    jenis: str              # KM / BANGUNAN
-    jenis_full: str
-    perunding: str
-    pemohon: str
+class MeetingInfo:
+    bil_no: int
+    year: int
+    date_str: str           # "12 Januari 2026"
+    day_str: str            # "Isnin"
+    bil_str: str            # "Bil.01/2026"
+
+
+@dataclass
+class CaseInfo:
+    seq: int                # running number (only PKM/BGN)
+    paper_no: str           # "OSC/PKM/01/2026"
     nama_permohonan: str
-    id_permohonan: str
+    pemilik_projek: str     # Pemohon
+    perunding: str
+    no_fail_osc: str
+    jenis_permohonan: str   # "PERMOHONAN KEBENARAN MERANCANG" / "PERMOHONAN PELAN BANGUNAN"
 
-def read_docx_lines(file_bytes: bytes) -> List[str]:
-    doc = Document(io.BytesIO(file_bytes))
-    lines = []
-    for p in doc.paragraphs:
-        t = normalize_spaces(p.text) if p.text else ""
-        if t:
-            lines.append(t)
-    return lines
 
-def parse_case_block(block_lines: List[str]) -> Optional[CaseItem]:
-    text_all = "\n".join(block_lines)
-
-    m_kertas = re.search(r"KERTAS\s+MESYUARAT\s+BIL\.?\s*[:\-]?\s*([A-Z0-9/]+)", text_all.upper())
-    if not m_kertas:
+# =========================
+# Helpers: date parsing
+# =========================
+def parse_malay_date(text: str):
+    import datetime
+    m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text, re.IGNORECASE)
+    if not m:
         return None
-    kertas = m_kertas.group(1).strip()
+    d = int(m.group(1))
+    mon = m.group(2).lower()
+    y = int(m.group(3))
+    if mon not in MONTHS_MS:
+        return None
+    return datetime.date(y, MONTHS_MS[mon], d)
 
-    jenis = None
-    jenis_full = None
 
-    # KM
-    if "PKM" in kertas or re.search(r"\bKEBENARAN\s+MERANCANG\b", text_all.upper()):
-        jenis = "KM"
-        jenis_full = "PERMOHONAN KEBENARAN MERANCANG"
-
-    # Bangunan
-    if jenis is None and ("PB" in kertas or ("BANGUNAN" in text_all.upper() and "PELAN" in text_all.upper())):
-        jenis = "BANGUNAN"
-        jenis_full = "PERMOHONAN PELAN BANGUNAN"
-
-    if jenis is None:
-        return None  # bukan KM/Bangunan
-
-    m_no = re.search(r"/(\d{1,3})/(\d{4})$", kertas)
-    case_no = m_no.group(1).zfill(2) if m_no else "00"
-
-    def pick(prefix: str) -> str:
-        for ln in block_lines:
-            if ln.upper().startswith(prefix.upper()):
-                parts = re.split(r"\s*[:\-]\s*", ln, maxsplit=1)
-                if len(parts) == 2:
-                    return parts[1].strip()
-        return ""
-
-    perunding = pick("Perunding") or "-"
-    pemohon = pick("Pemohon") or "-"
-    id_permohonan = pick("No Fail OSC") or pick("No. Fail OSC") or pick("No Fail") or pick("No. Fail") or "-"
-
-    nama_permohonan = ""
-    for ln in block_lines:
-        if ln.upper().startswith("PERMOHONAN "):
-            nama_permohonan = ln.strip()
-            break
-    if not nama_permohonan:
-        nama_permohonan = "-"
-
-    # fallback ID kalau tak ada label (kadang ada MBSP/... dalam perenggan)
-    if id_permohonan == "-" or not id_permohonan:
-        mm = re.search(r"\bMBSP/[A-Z0-9/().\- ]+\b", text_all)
-        if mm:
-            id_permohonan = normalize_spaces(mm.group(0))
-
-    return CaseItem(
-        case_no=case_no,
-        kertas_bil=kertas,
-        jenis=jenis,
-        jenis_full=jenis_full,
-        perunding=perunding,
-        pemohon=pemohon,
-        nama_permohonan=nama_permohonan,
-        id_permohonan=id_permohonan,
-    )
-
-def parse_agenda(file_bytes: bytes) -> Tuple[Dict, List[CaseItem]]:
-    lines = read_docx_lines(file_bytes)
-
-    bil_year = None
-    for ln in lines[:120]:
-        by = extract_bil_year(ln)
-        if by:
-            bil_year = by
-            break
-    if not bil_year:
-        for ln in lines:
-            by = extract_bil_year(ln)
-            if by:
-                bil_year = by
-                break
-
-    tarikh_mesyuarat = extract_tarikh_mesyuarat(lines)
-
-    info = {
-        "bil": bil_year[0] if bil_year else None,
-        "year": bil_year[1] if bil_year else None,
-        "bil_str": f"{bil_year[0]:02d}/{bil_year[1]}" if bil_year else "-",
-        "tarikh_mesyuarat": tarikh_mesyuarat or "-",
-    }
-
-    # blocks by "KERTAS MESYUARAT BIL"
-    blocks = []
-    cur = []
-    for ln in lines:
-        if ln.upper().startswith("KERTAS MESYUARAT BIL"):
-            if cur:
-                blocks.append(cur)
-            cur = [ln]
-        else:
-            if cur:
-                cur.append(ln)
-    if cur:
-        blocks.append(cur)
-
-    cases: List[CaseItem] = []
-    for b in blocks:
-        item = parse_case_block(b)
-        if item:
-            cases.append(item)
-
-    def keyfn(x: CaseItem):
-        try:
-            return int(x.case_no)
-        except:
-            return 9999
-    cases.sort(key=keyfn)
-
-    return info, cases
+def format_malay_date(dt):
+    return f"{dt.day} {MONTHS_MS_INV[dt.month]} {dt.year}"
 
 
 # =========================
-# WORD TEMPLATE FILL (TRANSFER ONLY)
+# Template run-safe editing
+# (avoid p.text=... (it kills formatting))
 # =========================
-def replace_paragraph_text_keep_style(paragraph: Paragraph, new_text: str) -> None:
-    for r in paragraph.runs[::-1]:
+def clone_run_format(src, dst):
+    dst.bold = src.bold
+    dst.italic = src.italic
+    dst.underline = src.underline
+    dst.font.name = src.font.name
+    dst.font.size = src.font.size
+    if src.font.color and src.font.color.rgb:
+        dst.font.color.rgb = src.font.color.rgb
+
+
+def set_value_after_colon(paragraph, new_value: str):
+    """
+    Find first ':' in runs, keep label part, replace ONLY the value part after colon.
+    Preserves formatting by reusing formatting from first value-run (if any).
+    """
+    runs = paragraph.runs
+    colon_idx = None
+    for i, r in enumerate(runs):
+        if ":" in r.text:
+            colon_idx = i
+            break
+
+    if colon_idx is None:
+        # fallback
+        paragraph.add_run(" " + new_value)
+        return
+
+    fmt_src = runs[colon_idx + 1] if colon_idx + 1 < len(runs) else runs[colon_idx]
+
+    # remove all runs after colon
+    for r in runs[colon_idx + 1:]:
         r._element.getparent().remove(r._element)
-    paragraph.add_run(new_text)
 
-def set_singleline_prefix(doc: Document, prefix: str, value: str) -> bool:
-    pref_u = prefix.upper()
+    # ensure colon run has a space at end
+    if not paragraph.runs[colon_idx].text.endswith(" "):
+        paragraph.runs[colon_idx].text = paragraph.runs[colon_idx].text + " "
+
+    new_run = paragraph.add_run(new_value)
+    clone_run_format(fmt_src, new_run)
+
+
+def replace_regex_in_runs(paragraph, pattern: str, repl: str):
+    for r in paragraph.runs:
+        r.text = re.sub(pattern, repl, r.text)
+
+
+# =========================
+# Parse Agenda
+# =========================
+LABELS = [
+    "PEMOHON",
+    "PERUNDING",
+    "LOKASI",
+    "KOORDINAT",
+    "NO. RUJUKAN",
+    "NO. RUJUKAN OSC",
+    "NO. FAIL OSC",
+    "NO FAIL OSC",
+]
+
+
+def is_label_line(line: str) -> bool:
+    return any(re.match(rf"^{re.escape(lab)}\s*:", line, re.IGNORECASE) for lab in LABELS)
+
+
+def get_labeled_value(block: List[str], label_variants: List[str]) -> str:
+    """
+    Find 'LABEL: value' then append following lines until next LABEL: ...
+    """
+    for i, line in enumerate(block):
+        for lab in label_variants:
+            if re.match(rf"^{re.escape(lab)}\s*:", line, re.IGNORECASE):
+                val = line.split(":", 1)[1].strip()
+                cont = []
+                for nxt in block[i + 1:]:
+                    if is_label_line(nxt):
+                        break
+                    if nxt.strip():
+                        cont.append(nxt.strip())
+                if cont:
+                    val = (val + " " + " ".join(cont)).strip()
+                return val
+    return ""
+
+
+def parse_meeting_info(paras: List[str]) -> MeetingInfo:
+    """
+    Extract Bil.xx/yyyy + Tarikh mesyuarat from top part of agenda.
+    """
+    head = " ".join(paras[:250])
+
+    m = re.search(r"Bil\.\s*0*(\d+)\s*/\s*(\d{4})", head, re.IGNORECASE)
+    if not m:
+        raise ValueError("Tak jumpa 'Bil. xx/yyyy' dalam agenda.")
+    bil_no = int(m.group(1))
+    year = int(m.group(2))
+    bil_str = f"Bil.{str(bil_no).zfill(2)}/{year}"
+
+    # find first Malay date with matching year
+    dt = None
+    for t in paras[:400]:
+        dtx = parse_malay_date(t)
+        if dtx and dtx.year == year:
+            dt = dtx
+            break
+    if not dt:
+        raise ValueError("Tak jumpa Tarikh mesyuarat (cth '12 Januari 2026') dalam agenda.")
+
+    date_str = format_malay_date(dt)
+    day_str = DAYS_MS[dt.weekday()]
+    return MeetingInfo(bil_no=bil_no, year=year, date_str=date_str, day_str=day_str, bil_str=bil_str)
+
+
+def parse_cases_from_agenda(paras: List[str]) -> List[CaseInfo]:
+    """
+    Extract ONLY OSC/PKM & OSC/BGN cases.
+    """
+    case_idxs = [i for i, t in enumerate(paras) if re.match(r"^KERTAS MESYUARAT BIL\.\s*OSC/(PKM|BGN)/", t, re.IGNORECASE)]
+    cases: List[CaseInfo] = []
+
+    for seq, idx in enumerate(case_idxs, start=1):
+        header = paras[idx].strip()
+        m = re.match(r"^KERTAS MESYUARAT BIL\.\s*(OSC/(PKM|BGN)/[^\s]+)", header, re.IGNORECASE)
+        paper_no = m.group(1).strip() if m else header
+
+        # collect block until next case
+        end = case_idxs[seq] if seq < len(case_idxs) else len(paras)
+        block_all = [x.strip() for x in paras[idx + 1:end] if x is not None]
+
+        # build nama_permohonan from multiple lines until first label line (Pemohon/Perunding/etc.)
+        title_parts = []
+        rest_block_start = 0
+        for j, line in enumerate(block_all):
+            if not line.strip():
+                continue
+            if is_label_line(line):
+                rest_block_start = j
+                break
+            title_parts.append(line.strip())
+            rest_block_start = j + 1
+
+        nama_permohonan = " ".join(title_parts).strip()
+
+        rest_block = block_all[rest_block_start:]
+
+        pemohon = get_labeled_value(rest_block, ["PEMOHON"])
+        perunding = get_labeled_value(rest_block, ["PERUNDING"])
+        no_fail_osc = get_labeled_value(rest_block, ["NO. RUJUKAN OSC", "NO. FAIL OSC", "NO FAIL OSC"])
+
+        # jenis permohonan
+        jenis = ""
+        if re.search(r"Kebenaran\s+Merancang", nama_permohonan, re.IGNORECASE):
+            jenis = "PERMOHONAN KEBENARAN MERANCANG"
+        elif re.search(r"Pelan\s+Bangunan", nama_permohonan, re.IGNORECASE):
+            jenis = "PERMOHONAN PELAN BANGUNAN"
+        else:
+            # still PKM/BGN - but fallback if wording pelik
+            if "/PKM/" in paper_no.upper():
+                jenis = "PERMOHONAN KEBENARAN MERANCANG"
+            elif "/BGN/" in paper_no.upper():
+                jenis = "PERMOHONAN PELAN BANGUNAN"
+
+        cases.append(
+            CaseInfo(
+                seq=seq,
+                paper_no=paper_no,
+                nama_permohonan=nama_permohonan,
+                pemilik_projek=pemohon,
+                perunding=perunding,
+                no_fail_osc=no_fail_osc,
+                jenis_permohonan=jenis,
+            )
+        )
+
+    return cases
+
+
+# =========================
+# Generate DOCX per case
+# =========================
+def build_rujukan_kami(meeting: MeetingInfo, case: CaseInfo) -> str:
+    # Inside document: (1)MBSP/15/1551/(01)2026
+    return f"({meeting.bil_no})MBSP/15/1551/({str(case.seq).zfill(2)}){meeting.year}"
+
+
+def build_filename(meeting: MeetingInfo, case: CaseInfo) -> str:
+    # Safe filename (no slash): (1)MBSP-15-1551-(001)2026.docx
+    return f"({meeting.bil_no})MBSP-15-1551-({str(case.seq).zfill(3)}){meeting.year}.docx"
+
+
+def generate_doc_bytes(meeting: MeetingInfo, case: CaseInfo) -> bytes:
+    doc = Document(TEMPLATE_PATH)
+
+    # 1) Header fields (tab-based lines)
+    rujukan_kami = build_rujukan_kami(meeting, case)
+
     for p in doc.paragraphs:
-        t = normalize_spaces(p.text)
-        if t.upper().startswith(pref_u):
-            replace_paragraph_text_keep_style(p, f"{prefix} {value}".rstrip())
-            return True
-    return False
+        tx = (p.text or "").strip()
 
-def set_field_in_template(doc: Document, label: str, value: str) -> bool:
-    # cari paragraph yang bermula label (contoh: "Perunding")
-    target = label.strip().upper()
-    for p in doc.paragraphs:
-        t = normalize_spaces(p.text)
-        if t and t.upper().startswith(target):
-            replace_paragraph_text_keep_style(p, f"\t{label}\t:\t{value}")
-            return True
-    return False
+        # top header
+        if tx.startswith("Rujukan Kami"):
+            set_value_after_colon(p, rujukan_kami)
+        elif tx.startswith("Tarikh"):
+            set_value_after_colon(p, meeting.date_str)
 
-def build_rujukan_kami(bil: int, year: int, case_no: str) -> str:
-    return f"({bil})MBSP/15/1551/({case_no}){year}"
+        # case info block
+        elif tx.startswith("Perunding"):
+            set_value_after_colon(p, case.perunding)
+        elif tx.startswith("Pemilik Projek"):
+            set_value_after_colon(p, case.pemilik_projek)
+        elif tx.startswith("Jenis Permohonan"):
+            set_value_after_colon(p, case.jenis_permohonan)
+        elif tx.startswith("Nama Permohonan"):
+            set_value_after_colon(p, case.nama_permohonan)
+        elif tx.startswith("No Fail OSC"):
+            set_value_after_colon(p, case.no_fail_osc)
 
-def generate_doc_for_case(template_bytes: bytes, info: Dict, case: CaseItem) -> bytes:
-    doc = Document(io.BytesIO(template_bytes))
+        # 2) Body paragraph that contains meeting bil/date/day
+        # Example in template: "... Mesyuarat ... Bil.05/2025 ... 13 Mac 2025 (Khamis) ..."
+        if "Mesyuarat" in tx and "Bil." in tx and "bersidang" in tx:
+            replace_regex_in_runs(p, r"Bil\.\s*\d+\s*/\s*\d{4}", meeting.bil_str)
+            replace_regex_in_runs(p, r"\d{1,2}\s+[A-Za-z]+\s+\d{4}", meeting.date_str)
+            replace_regex_in_runs(p, r"\((Isnin|Selasa|Rabu|Khamis|Jumaat|Sabtu|Ahad)\)", f"({meeting.day_str})")
 
-    bil = info.get("bil") or 0
-    year = info.get("year") or 0
-    tarikh = info.get("tarikh_mesyuarat", "-")
-
-    # Rujukan Kami + Tarikh (auto ikut tarikh mesyuarat)
-    if bil and year:
-        set_singleline_prefix(doc, "Rujukan Kami:", build_rujukan_kami(bil, year, case.case_no))
-    set_singleline_prefix(doc, "Tarikh:", tarikh)
-
-    # TRANSFER DATA SAHAJA
-    set_field_in_template(doc, "Perunding", case.perunding)
-    set_field_in_template(doc, "Pemohon", case.pemohon)
-    set_field_in_template(doc, "Jenis Permohonan", case.jenis_full)
-    set_field_in_template(doc, "Nama Permohonan", case.nama_permohonan)
-    set_field_in_template(doc, "ID Permohonan", case.id_permohonan)
-
-    # Keputusan: BIAR KOSONG / BIAR TEMPLATE ASAL (staf isi manual)
-    # -> Kita tak sentuh langsung mana-mana ayat keputusan.
-
-    out = io.BytesIO()
+    out = BytesIO()
     doc.save(out)
     return out.getvalue()
 
-def make_zip(docs: List[Tuple[str, bytes]]) -> bytes:
-    buf = io.BytesIO()
+
+def generate_zip(meeting: MeetingInfo, cases: List[CaseInfo]) -> bytes:
+    buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for filename, b in docs:
-            z.writestr(filename, b)
+        for c in cases:
+            doc_bytes = generate_doc_bytes(meeting, c)
+            z.writestr(build_filename(meeting, c), doc_bytes)
     return buf.getvalue()
 
 
 # =========================
-# APP FLOW (NO PILIH-PILIH)
+# Streamlit UI
 # =========================
+st.set_page_config(page_title="Pemakluman Keputusan JKOSC", layout="wide")
+st.title("Pemakluman Keputusan JKOSC")
+st.caption("Upload Agenda (Word) → sistem extract OSC/PKM & OSC/BGN → generate dokumen panggilan (Word) untuk download (ZIP).")
+
+if not st.secrets and True:
+    # no-op; just to avoid lint complaints
+    pass
+
 uploaded = st.file_uploader("Upload fail Agenda (DOCX)", type=["docx"])
 
-TEMPLATE_PATH = "templates/template dokumen panggilan.docx"
+st.markdown("---")
 
 if uploaded is None:
-    st.info("Upload Agenda dulu. Sistem akan auto jana semua dokumen KM & Bangunan (transfer data sahaja).")
+    st.info("Sila upload Agenda (DOCX).")
     st.stop()
 
+# Read agenda bytes
 agenda_bytes = uploaded.read()
 
+# Parse
 try:
-    with open(TEMPLATE_PATH, "rb") as f:
-        template_bytes = f.read()
-except Exception:
-    st.error("Template tak jumpa. Pastikan ada: `templates/template dokumen panggilan.docx`")
+    agenda_doc = Document(BytesIO(agenda_bytes))
+    paras = [(p.text or "").strip() for p in agenda_doc.paragraphs]
+    meeting = parse_meeting_info(paras)
+    cases = parse_cases_from_agenda(paras)
+except Exception as e:
+    st.error(f"❌ Gagal baca agenda: {e}")
     st.stop()
 
-info, cases = parse_agenda(agenda_bytes)
+# Show summary
+st.success(f"✅ Jumpa {meeting.bil_str} | Tarikh: {meeting.date_str} ({meeting.day_str}) | Kes PKM/BGN: {len(cases)}")
 
-st.success(f"Bil: {info.get('bil_str','-')} | Tarikh Mesyuarat: {info.get('tarikh_mesyuarat','-')} | Kes KM/Bangunan: {len(cases)}")
+with st.expander("Semakan (auto dari agenda)", expanded=True):
+    st.write(f"**Bil Mesyuarat:** {meeting.bil_str}")
+    st.write(f"**Tarikh Mesyuarat:** {meeting.date_str} ({meeting.day_str})")
+    st.write(f"**Jumlah kes PKM/BGN:** {len(cases)}")
 
-if len(cases) == 0:
-    st.error("Sistem tak jumpa kes KM/Bangunan dalam agenda (format agenda tak match parser).")
-    st.stop()
+    if len(cases) > 0:
+        st.write("**Contoh 5 kes terawal (ringkas):**")
+        for c in cases[:5]:
+            st.write(f"- ({c.seq}) {c.paper_no} | {c.jenis_permohonan} | {c.no_fail_osc}")
 
-st.subheader("Preview (auto detect) — untuk semak je")
-for c in cases[:10]:
-    st.write(f"- {c.kertas_bil} | {c.perunding} | {c.pemohon}")
+# Generate button
+col1, col2 = st.columns([1, 3])
+with col1:
+    gen = st.button("Jana & Download (ZIP)", type="primary", use_container_width=True)
 
-st.divider()
+if gen:
+    # template existence check
+    try:
+        _ = Document(TEMPLATE_PATH)
+    except Exception:
+        st.error(f"❌ Template tak jumpa / tak boleh dibuka: '{TEMPLATE_PATH}'. Pastikan file tu ada dalam folder 'templates/'.")
+        st.stop()
 
-if st.button("Generate & Download (ZIP)", type="primary", use_container_width=True):
-    with st.spinner("Sedang jana dokumen (transfer data sahaja)..."):
-        bil = info.get("bil") or 0
-        year = info.get("year") or 0
+    if len(cases) == 0:
+        st.error("❌ Tiada kes OSC/PKM atau OSC/BGN dijumpai dalam agenda.")
+        st.stop()
 
-        docs = []
-        for c in cases:
-            doc_bytes = generate_doc_for_case(template_bytes, info, c)
-            ruj = build_rujukan_kami(bil, year, c.case_no) if (bil and year) else f"CASE_{c.case_no}"
-            filename = f"{ruj.replace('/','-')}.docx"
-            docs.append((filename, doc_bytes))
+    with st.spinner("Sedang jana dokumen..."):
+        zip_bytes = generate_zip(meeting, cases)
 
-        zip_bytes = make_zip(docs)
-
+    st.success("✅ Siap jana dokumen.")
     st.download_button(
-        "Download ZIP",
+        label="Download ZIP",
         data=zip_bytes,
-        file_name=f"pemakluman_keputusan_{info.get('bil_str','-').replace('/','-')}.zip",
+        file_name=f"Pemakluman_{meeting.bil_str.replace('/','-')}_{meeting.year}.zip",
         mime="application/zip",
         use_container_width=True,
     )
