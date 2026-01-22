@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import base64
 import io
 import re
@@ -91,7 +90,7 @@ def _fix_keputusan_table(doc: Document):
 
     for row in target.rows:
         for cell in row.cells:
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
             for p in cell.paragraphs:
                 _set_para_compact(p)
 
@@ -194,8 +193,6 @@ def _set_paragraph_text(paragraph, text: str, name="Arial", size_pt=11, bold=Fal
     run = paragraph.add_run(text)
     _set_run_font(run, name=name, size_pt=size_pt, bold=bold, color_rgb=color_rgb)
     return paragraph
-    return paragraph
-
 def _set_cell_text(cell, text: str, name="Arial", size_pt=11, bold=False, preserve_linebreaks=True, color_rgb=(0,0,0), align=None):
     # Clear existing paragraphs
     for p in cell.paragraphs:
@@ -356,68 +353,35 @@ def _fill_doc(case: dict, meeting_bil: str, meeting_date: datetime.date, case_no
     # Meeting date strings
     tarikh_str = _to_date_string(meeting_date)
     hari_str = _HARI_MAP[meeting_date.weekday()]
-    # Agenda number/year for Rujukan Kami
-    # IMPORTANT: follow the case order in agenda: 1..N (do NOT reset when BGN starts)
-    year = meeting_bil.split("/")[1] if meeting_bil and "/" in meeting_bil else str(meeting_date.year)
-    # Format: (No)MBSP/15/1551/(No)YYYY  — bracket MUST follow sequential agenda numbering
-    rujukan_kami = f"({case_no})MBSP/15/1551/({case_no:03d}){year}"
 
-    # 1) Header paragraphs (top right) in BODY (first page layout)
+    # Agenda number/year for Rujukan Kami
+    year = str(tarikh.year) if hasattr(tarikh, "year") else str(tarikh)[-4:]
+    # Nombor dalam kurungan kedua ikut turutan keseluruhan dokumen (1..38)
+    seq_no = str(case_no)
+    rujukan_kami = f"({case_no})MBSP/15/1551/({seq_no}){year}"
+    tarikh_text = tarikh.strftime("%d %B %Y") if hasattr(tarikh, "strftime") else str(tarikh)
+
+    # Update existing body placeholders (if any) to black, no extra spacing
     for p in doc.paragraphs:
-        t = p.text.strip()
+        t = (p.text or "").strip()
         if t.startswith("Rujukan Tuan"):
             _set_paragraph_text(p, "Rujukan Tuan :", color_rgb=(0,0,0))
-            _set_para_compact(p)
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
         elif t.startswith("Rujukan Kami"):
             _set_paragraph_text(p, f"Rujukan Kami : {rujukan_kami}", color_rgb=(0,0,0))
-            _set_para_compact(p)
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
         elif t.startswith("Tarikh"):
-            _set_paragraph_text(p, f"Tarikh : {tarikh_str}", color_rgb=(0,0,0))
-            _set_para_compact(p)
+            _set_paragraph_text(p, f"Tarikh : {tarikh_text}", color_rgb=(0,0,0))
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
 
-    # Repeat the same block on page 2+ via Word header
-    _ensure_rujukan_in_header(doc, rujukan_kami, tarikh_str)
-
-    # 2) Top table (Kepada/Pemilik/Jenis/Nama/ID)
-    if doc.tables:
-        t0 = doc.tables[0]
-        # rows expected: 0 Kepada(PSP), 1 Pemilik Projek, 2 Jenis Permohonan, 3 Nama Permohonan, 4 ID Permohonan
-        _set_cell_text(t0.cell(0,2), case.get("perunding",""), preserve_linebreaks=False)
-        _set_cell_text(t0.cell(1,2), case.get("pemohon",""), preserve_linebreaks=False)
-        _set_cell_text(t0.cell(2,2), case.get("jenis_permohonan",""), preserve_linebreaks=False)
-        _set_cell_text(t0.cell(3,2), case.get("nama_permohonan",""), preserve_linebreaks=True, align=WD_ALIGN_PARAGRAPH.LEFT)
-        _set_cell_text(t0.cell(4,2), case.get("id_permohonan",""), preserve_linebreaks=False)
-
-    # 3) Paragraph 2 (mesyuarat bil & tarikh) — rebuild to keep bolding clean
-    target_para = None
-    for p in doc.paragraphs:
-        if "Adalah dimaklumkan bahawa" in p.text and "Mesyuarat Jawatankuasa Pusat Setempat" in p.text:
-            target_para = p
-            break
-
-    if target_para is not None:
-        # keep paragraph formatting, rebuild runs
-        fmt = target_para.paragraph_format
-        # clear runs
-        for r in list(target_para.runs):
-            r.text = ""
-        target_para.text = ""
-
-        def add(text, bold=False):
-            r = target_para.add_run(text)
-            _set_run_font(r, name="Arial", size_pt=11, bold=bold)
-            return r
-
-        add("2.\tAdalah dimaklumkan bahawa ")
-        add("Mesyuarat Jawatankuasa Pusat Setempat (OSC) ", bold=True)
-        add(f"Bil.{meeting_bil} ", bold=True)
-        add("yang bersidang pada ")
-        add(f"{tarikh_str} ({hari_str}) ", bold=True)
-        add("bersetuju untuk memberikan keputusan ke atas permohonan yang telah dikemukakan oleh pihak tuan/ puan seperti mana berikut:")
-    # Fix checkbox/table alignment for keputusan
-    _fix_keputusan_table(doc)
+    # Ensure header repeats on page 2+ and remove (blank) any body copies to avoid extra gap
+    _ensure_rujukan_in_header(doc, rujukan_kami, tarikh_text)
 
     return doc
+
 
 def build_zip(agenda_doc: Document) -> tuple[bytes, dict]:
     parsed = parse_agenda(agenda_doc)
