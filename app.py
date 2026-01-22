@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import base64
 import io
 import re
@@ -228,7 +229,7 @@ def _parse_meeting_info(paras: list[str]) -> tuple[str|None, datetime.date|None]
 
     day = int(m_date.group(1))
     mon_name = m_date.group(2).upper()
-    year = int(m_date.group(3))
+    year = str(meeting_date.year)
     if mon_name not in _BULAN_MAP:
         return bil, None
 
@@ -355,11 +356,11 @@ def _fill_doc(case: dict, meeting_bil: str, meeting_date: datetime.date, case_no
     hari_str = _HARI_MAP[meeting_date.weekday()]
 
     # Agenda number/year for Rujukan Kami
-    year = str(tarikh.year) if hasattr(tarikh, "year") else str(tarikh)[-4:]
+    year = str(meeting_date.year)
     # Nombor dalam kurungan kedua ikut turutan keseluruhan dokumen (1..38)
     seq_no = str(case_no)
     rujukan_kami = f"({case_no})MBSP/15/1551/({seq_no}){year}"
-    tarikh_text = tarikh.strftime("%d %B %Y") if hasattr(tarikh, "strftime") else str(tarikh)
+    tarikh_text = tarikh_str
 
     # Update existing body placeholders (if any) to black, no extra spacing
     for p in doc.paragraphs:
