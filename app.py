@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import base64
 import io
 import re
@@ -205,12 +206,10 @@ def _set_cell_text(cell, text: str, name="Arial", size_pt=11, bold=False, preser
     p = cell.paragraphs[0]
     if align is not None:
         p.alignment = align
-    if preserve_linebreaks and "
-" in text:
+    if preserve_linebreaks and "\n" in text:
         run = p.add_run("")
         _set_run_font(run, name=name, size_pt=size_pt, bold=bold, color_rgb=color_rgb)
-        parts = text.split("
-")
+        parts = text.split("\n")
         for idx, part in enumerate(parts):
             if idx > 0:
                 run.add_break()  # line break within same paragraph
@@ -357,11 +356,11 @@ def _fill_doc(case: dict, meeting_bil: str, meeting_date: datetime.date, case_no
     # Meeting date strings
     tarikh_str = _to_date_string(meeting_date)
     hari_str = _HARI_MAP[meeting_date.weekday()]
-
     # Agenda number/year for Rujukan Kami
-# IMPORTANT: follow the case order in agenda: 1..N (do NOT reset when BGN starts)
-year = meeting_bil.split("/")[1] if meeting_bil and "/" in meeting_bil else str(meeting_date.year)
-rujukan_kami = f"({case_no})MBSP/15/1551/(   ){year}"
+    # IMPORTANT: follow the case order in agenda: 1..N (do NOT reset when BGN starts)
+    year = meeting_bil.split("/")[1] if meeting_bil and "/" in meeting_bil else str(meeting_date.year)
+    # Format: (No)MBSP/15/1551/(No)YYYY  — bracket MUST follow sequential agenda numbering
+    rujukan_kami = f"({case_no})MBSP/15/1551/({case_no:03d}){year}"
 
     # 1) Header paragraphs (top right) in BODY (first page layout)
     for p in doc.paragraphs:
