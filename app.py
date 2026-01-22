@@ -229,7 +229,7 @@ def _parse_meeting_info(paras: list[str]) -> tuple[str|None, datetime.date|None]
 
     day = int(m_date.group(1))
     mon_name = m_date.group(2).upper()
-    year = str(meeting_date.year)
+    year = int(m_date.group(3))
     if mon_name not in _BULAN_MAP:
         return bil, None
 
@@ -357,9 +357,14 @@ def _fill_doc(case: dict, meeting_bil: str, meeting_date: datetime.date, case_no
 
     # Agenda number/year for Rujukan Kami
     year = str(meeting_date.year)
-    # Nombor dalam kurungan kedua ikut turutan keseluruhan dokumen (1..38)
+    # Kurungan pertama ikut bil mesyuarat (cth 01/2026 -> 1)
+    try:
+        meeting_seq = int(str(meeting_bil).split("/")[0].lstrip("0") or "0")
+    except Exception:
+        meeting_seq = 0
+    # Kurungan kedua ikut turutan keseluruhan dokumen (1..38)
     seq_no = str(case_no)
-    rujukan_kami = f"({case_no})MBSP/15/1551/({seq_no}){year}"
+    rujukan_kami = f"({meeting_seq})MBSP/15/1551/({seq_no}){year}"
     tarikh_text = tarikh_str
 
     # Update existing body placeholders (if any) to black, no extra spacing
